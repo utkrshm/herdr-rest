@@ -20,35 +20,66 @@ The other plugins don't provide a comprehensive view of the paused coding agents
 (which I normally use to navigate in Herdr).
 I also don't get a comprehensive Inactivity view of all my agents, giving a snapshot of the status of all my agents.
 
+I tried to build this plugin keeping all of that in mind, and coming to a general solution for everything.
 
+## Features
 
-## Install
+- Automatically pause idle agents in unfocused projects to free memory.
+- Resume the same native session when you focus its pane.
+- Find sleeping agents in Go To, with their coding-agent type and session title.
+- View agent states, inactivity countdowns, and last-active times inside Herdr.
+- Recover sleeping sessions across Herdr restarts when their destinations can
+  be verified.
+- Use one configuration across your Herdr sessions, with separate runtime state
+  for each session.
 
-Link this directory with `herdr plugin link /path/to/herdr-rest`. The
-startup hook starts one detached watcher; an atomic lock makes repeated
-startup hooks harmless. Runtime commands execute with the plugin root as their
-working directory, as specified by Herdr.
+## Requirements
 
-Herdr reports the editable configuration directory with:
+- Herdr **0.9.1 or newer**.
+- Python **3.11 or newer**, with `curses` support, available as `python3`.
+- Linux or macOS.
+- Supported coding-agent executables available to Herdr.
+- Native Herdr integrations for Codex and Pi if you use those agents.
 
-```bash
-herdr plugin config-dir herdr.rest
-```
+The plugin uses the Python standard library; no additional Python packages are
+required.
 
-The watcher starts automatically with Herdr's server startup hook. Hibernated
-sessions remain in Go To, and focusing their pane resumes them automatically.
-The small internal parser in `__main__.py` dispatches Herdr's manifest entry
-points (`start`, `run`, `focus`, `open-view`, and `view`). The startup command is
-simply `python3 -m herdr_rest start`; there are no manual list/resume/restart
-actions or standalone debugging commands.
+## Installation
 
-On first startup, the plugin atomically creates a default `config.toml` in
-Herdr's plugin configuration directory. It never overwrites an existing file;
-the fallback configuration directory is shared by the plugin, not the
-socket-hashed runtime state directory. Configuration is shared by the user's
-Herdr sessions.
+1. Clone or download this repository to a directory you will keep on disk.
+2. Link the checkout into Herdr:
 
-Edit that file when you want to change the policy:
+   ```bash
+   herdr plugin link /path/to/herdr-rest
+   ```
+
+   Replace the path with the absolute path to your checkout.
+
+3. If you use Codex or Pi, install the corresponding Herdr integration:
+
+   ```bash
+   herdr integration install codex
+   herdr integration install pi
+   ```
+
+   Run only the command for each agent you use.
+
+4. Start a Herdr server session, or restart an existing server to run the
+   plugin's startup hook. Herdr Rest starts its background watcher automatically.
+5. Locate the generated configuration directory:
+
+   ```bash
+   herdr plugin config-dir herdr.rest
+   ```
+
+   It contains `config.toml` after the first startup. To check agent tracking,
+   open the [inactivity view](#inactivity-view).
+
+## Configuration
+
+Edit `config.toml` in the directory returned by
+`herdr plugin config-dir herdr.rest`. Herdr Rest creates it on first startup and
+preserves existing settings. Configuration is shared across your Herdr sessions.
 
 ```toml
 [hibernate]
@@ -56,154 +87,57 @@ idle_seconds = 900
 poll_seconds = 2
 focus_debounce_seconds = 0.15
 terminate_wait_seconds = 15
-herdr_binary = "herdr" # useful for a fake CLI in tests
+herdr_binary = "herdr"
 ```
 
-`idle_seconds` is the single global inactivity policy for every supported agent.
+All durations are in seconds.
 
-`HERDR_BIN_PATH` takes precedence over `herdr_binary`. Workspace focus is
-observed by polling `workspace.list`; any focused pane or tab makes its entire
-project safe and clears every agent's inactivity timer. When the project becomes
-unfocused, each eligible agent starts a fresh timer. Missing or malformed focus
-data, an agent identity change, or a Herdr API outage clears inactivity tracking
-and fails closed. Activity sequence, status, or native session changes reset
-only that agent's timer. The `pane.focused` hook writes one coalesced,
-per-session wake request, so a focus event normally starts the authoritative
-check within about 50 ms instead of waiting for the next two-second poll. The
-0.15-second debounce remains asynchronous and configurable: it prevents an
-eager resume while the user is only passing across a pane. The debounce deadline
-is scheduled directly, rather than quantized to the next poll. Startup time for
-the resumed agent is separate and may be longer.
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `idle_seconds` | `900` | Inactivity interval before an eligible agent sleeps (15 minutes). |
+| `poll_seconds` | `2` | Interval between background status checks. |
+| `focus_debounce_seconds` | `0.15` | How long a sleeping pane must stay focused before resume begins. |
+| `terminate_wait_seconds` | `15` | Maximum wait for the agent process and its Herdr registration to clear. |
+| `herdr_binary` | `"herdr"` | Herdr executable name or path. |
 
-When an eligible native session is within 30 seconds of hibernation, Herdr Rest
-tries to show one notification per native session and inactivity interval. The
-notification may be unavailable when Herdr has no foreground client, is busy,
-rate-limited, or has toast delivery disabled; those failures never postpone or
-cancel the safety checks.
+Durations must be positive, except `focus_debounce_seconds`, which may be `0`.
+Herdr's `HERDR_BIN_PATH` environment variable takes precedence over
+`herdr_binary`.
 
-## Safety and limitations
+Valid configuration changes apply automatically at the next background check
+and start fresh inactivity countdowns.
 
-* A native session reference, terminal ID, pane ID, supported agent kind, and
-  discoverable foreground process are all required. Missing or ambiguous data
-  fails closed. State and locks are scoped by the exact `HERDR_SOCKET_PATH`,
-  not a shared default directory.
-* Agent eligibility uses semantic `idle` state and excludes focused or
-  launch-pending agents. `interactive_ready` is not required: Herdr omits that
-  launch hint for ordinary idle agents started directly from a shell.
-  `done` agents are protected and have no running idle timer; once Herdr
-  reports `idle`, a fresh countdown starts while their project is unfocused.
-* The daemon re-fetches the project and agent immediately before stopping it,
-  checks that the same agent is still eligible, unfocused, and past its own
-  inactivity interval, persists recovery state, and verifies the exact
-   foreground process before the agent-specific exit action. It never guesses a PID or steals
-  focus.
-* OpenCode resumes with `opencode --session ID`; Claude with `claude --resume ID`;
-  Codex with `codex resume SESSION`; and Pi with `pi --session REF`. Pi prefers
-  Herdr's absolute JSONL session path and otherwise uses its ID. The path is
-  persisted as a path reference; the plugin does not read it or scan the disk.
-* Codex is stopped only with one validated Herdr `agent send-keys ... ctrl+d`
-  request, and only after a live identity recheck and a conservative visible
-  screen check proves the last composer row is exactly `› Ask Codex to do
-  anything`. A non-empty or unknown draft is a no-op: no recovery record is
-  retained, no text is submitted, no signal is sent, and a later poll can retry
-  after the draft clears. The plugin never sends `/quit`, never sends multiple
-   keys, and never escalates to SIGKILL.
-   Codex versions with a different placeholder are conservatively skipped by
-   the current screen check, even if their composer is empty.
-* Pi is stopped with one SIGTERM after exact process-profile validation. Pi's
-  current released interactive mode handles SIGTERM/SIGHUP, emits its
-  `session_shutdown` cleanup, and restores the terminal (Pi 0.77+); older Pi
-  builds without that behavior are not promised. OpenCode and Claude retain their existing
-  one-SIGTERM behavior. Every method waits for both the verified process and
-  Herdr's agent registration to clear; a timeout retains a failed recovery
-  record and is not reported as success.
+## Usage
 
-The implementation follows Herdr's documented `agent.list`, `pane.list`,
-`workspace.list`, `pane.process-info`, and `agent start` surfaces. It reconciles missing panes
-and updates records when a live terminal receives a new pane ID. Herdr plugin
-startup commands are not supervised, so the watcher is explicitly detached
-and singleton-locked. Focus events are best-effort wake hints; startup or older
-servers that do not emit them continue to work through polling.
-The plugin does not buffer input, wake on background requests, use LRU or
-memory-pressure policies, or claim lossless draft preservation. Install the
-native Herdr integrations separately (do not run these as part of plugin
-startup): `herdr integration install codex` and `herdr integration install pi`.
-The installed `codex` and `pi` commands must also be available to Herdr's
-`agent start` path.
-This implementation is validated against fake Herdr/CLI fixtures; it does not
-claim that every installed agent version or packaging layout has been tested.
+Once installed, pause and resume are automatic:
 
-## Supported profiles
+1. Work in a project as usual. A project is a Herdr workspace; all agents in the
+   focused workspace are protected, including agents in its other tabs.
+2. Switch to another project. Each eligible idle agent in the previous project
+   starts its own countdown. Agent activity or status changes reset its timer;
+   returning to the project clears all its timers.
+3. After the configured interval, the idle agent stops and its pane stays in
+   Go To with a sleeping label:
 
-An isolated PTY test of installed Codex 0.160.0 confirmed that SIGTERM sent
-directly to the native binary exits with signal 15 but leaves raw input, echo
-suppression, bracketed paste, and focus reporting enabled. Enhanced keyboard
-reporting also remains enabled when active. Native Ctrl-D restores all measured
-modes. The comparison was repeated with keyboard enhancement enabled and
-disabled, without submitting any model prompts or touching existing sessions.
+   ```text
+   [sleeping] opencode: Fix authentication tests
+   ```
 
-| Agent | Session reference | Resume argv | Stop method |
-|---|---|---|---|
-| OpenCode | ID | `opencode --session ID` | verified SIGTERM |
-| Claude | ID | `claude --resume ID` | verified SIGTERM |
-| Codex | ID, source `herdr:codex` | `codex resume ID` | one safe `ctrl+d` only when empty |
-| Pi | absolute path preferred, or ID, source `herdr:pi` | `pi --session REF` | verified SIGTERM |
+4. Select that pane to resume the same session. Resume begins after the focus
+   debounce; the coding agent's own startup may take longer.
 
-Pi process matching is fail-closed: it accepts the native `pi` executable or a
-`node`/`bun` wrapper whose script is exactly `dist/cli.js` under the known
-`@mariozechner/pi-coding-agent` or `@earendil-works/pi-coding-agent` package
-structure. An arbitrary script containing `pi` is not accepted.
+Herdr Rest attempts a notification 30 seconds before an eligible agent sleeps.
+Pausing does not depend on notification delivery.
 
-Upstream references checked for this implementation:
+After resume, the original pane label or automatic naming is restored. Labels
+you edit while a session sleeps and explicitly assigned agent names are
+preserved. Temporary launch names are cleared so Go To and the sidebar show
+normal tab/pane names and coding-agent labels.
 
-* Herdr plugin manifest, runtime environment, and event-hook contract:
-  <https://herdr.dev/docs/plugins/>
-* Herdr `pane.focused` event and plugin event-hook behavior:
-  <https://herdr.dev/docs/socket-api/>
+## Inactivity view
 
-* Herdr resume/session validation and argv planning:
-  <https://raw.githubusercontent.com/herdrdev/herdr/master/src/agent_resume.rs>
-* Herdr key validation and agent send-keys surface (v0.9 reference):
-  <https://github.com/ogulcancelik/herdr/blob/3d9d2b18dab139ba226ebc5a1c9a9f2c9c3ee4df/docs/versions/0.9.0/website/src/content/docs/cli-reference.mdx>
-* Codex current TUI source: `ChatWidget` uses `composer_is_empty` for its
-  Ctrl+D quit path, while the composer emptiness check includes attachments:
-  <https://github.com/openai/codex/blob/main/codex-rs/tui/src/chatwidget.rs>
-  and <https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/chat_composer.rs>
-  (historical behavior change: <https://github.com/openai/codex/issues/1443>)
-* Pi interactive signal ownership and terminal cleanup:
-  <https://github.com/earendil-works/pi/pull/4426>
-  <https://pi.dev/changelog/releases/0.77.0>
-  and <https://pi.dev/changelog/releases/0.79.4>
-  and <https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/modes/interactive/interactive-mode.ts>
-
-## Sleeping labels in Go To
-
-Terminal IDs identify a live terminal instance and change when Herdr recreates
-panes after a server restart. Saved hibernation records are rebound using their
-persistent pane/workspace/tab IDs, working directory, exact owned sleeping
-label, and a verified shell (or the matching already-restored native session).
-Old process IDs are discarded during rebinding. Records that cannot yet be
-verified are archived in `orphaned.json`, rather than deleted, and retried on
-later checks. Ambiguous or occupied destinations are never guessed. Binding
-recovery is logged in `daemon.log`.
-
-Confirmed hibernated panes receive a temporary label in the format
-`[sleeping] <agent-name>: <session-title>`, for example
-`[sleeping] opencode: Fix authentication tests`. Session titles are captured
-before stopping the agent; an existing custom pane label is preserved separately
-for restoration. Older records without a title fall back to their stored label
-or native session ID. Herdr's Go To navigator uses the pane label, so these
-entries remain identifiable and selectable even with the agent process stopped.
-The prefix also appears on other surfaces that display pane labels.
-
-The previous custom label is restored after the agent resumes; automatic labels
-are restored by clearing the temporary label. A label you edit while the agent
-sleeps is preserved. Existing hibernation records are labelled on the watcher's
-next check, and failed stops are not labelled while the agent is still live.
-
-## Agent inactivity inside Herdr
-
-Bind the plugin's **Agent inactivity** action in Herdr's config:
+Add the **Agent inactivity** action to your Herdr `config.toml` (normally
+`~/.config/herdr/config.toml`):
 
 ```toml
 [[keys.command]]
@@ -213,47 +147,117 @@ command = "herdr.rest.inactivity"
 description = "Agent inactivity"
 ```
 
-Reload Herdr's keybindings with **prefix, Shift-R**. Open the view with
-**prefix, i**. With the default prefix this is Ctrl-B then i; with a
-Ctrl-Space prefix it is Ctrl-Space then i. No shell command is needed.
+To change the shortcut, edit `key` in this entry. For example, use
+`key = "ctrl+alt+i"` for a direct shortcut without the prefix, or choose another
+unused `prefix+…` binding. Keep `type = "plugin_action"` and
+`command = "herdr.rest.inactivity"` unchanged.
 
-The view is a Herdr-managed popup covering the current session's projects.
-It keeps the underlying tab/pane focus and does not acknowledge completions or
-reset timers. Its columns are exactly:
+Reload Herdr's keybindings with **prefix, Shift-R**, then open the view with
+your chosen shortcut. With the example's `prefix+i` binding and a Ctrl-Space
+prefix, press Ctrl-Space, then i.
 
-```text
-Project  Agent  Session  State  Remaining  Last active
-```
+The popup covers the current Herdr session's projects and preserves the
+underlying pane focus. Opening it does not reset inactivity timers or acknowledge
+agent completions.
 
-`Remaining` shows **protected** for done agents and every agent in the focused
-project. Unfocused idle agents show their countdown; sleeping, working, blocked,
-and unknown agents show **—**. An idle agent with unavailable/stale timer data
-shows **unknown**. Sleeping sessions use their saved titles.
+| Column | Meaning |
+| --- | --- |
+| Project | Herdr workspace containing the agent. |
+| Agent | Coding-agent type. |
+| Session | Native session title, including saved titles for sleeping sessions. |
+| State | Current agent state or `sleeping`. |
+| Remaining | Inactivity countdown, `protected`, `unknown`, or `—`. |
+| Last active | Latest observed activity in local time, or `unknown`. |
 
-`Last active` shows a local timestamp (`YYYY-MM-DD HH:MM:SS`) for the latest
-observed work, activity/state change, or focus of that agent's pane. Focusing
-the project still resets every idle timer, but does not rewrite the activity
-timestamps of its other panes. Activity timestamps survive watcher reloads and
-hibernation. Sessions that were already idle or asleep before tracking began
-show **unknown** until activity is observed; the plugin does not invent a
-historical time. The snapshot title shows the local timezone.
+**Remaining** shows `protected` for every agent in the focused project and for
+`done` agents. Unfocused idle agents show a countdown, or `unknown` when timer
+data is unavailable. Other states show `—`.
 
-The table is a timestamped snapshot; it does not refresh itself. Close and reopen
-it for a new snapshot. Use j/k or arrow keys to scroll, gg/G for the beginning/end,
-h/l for horizontal scrolling on narrow screens, and q or Escape to close.
+**Last active** tracks observed work, activity/state changes, and focus of that
+agent's pane. Focusing a project resets its idle timers without changing the
+other panes' last-active timestamps. Timestamps survive watcher reloads and
+sleep; older sessions show `unknown` until activity is observed.
 
-## Updating the plugin
+The view is a timestamped snapshot, not a live-updating table. Close and reopen
+it for a fresh snapshot.
 
-For a locally linked plugin, edits use the same checkout. After changing the
-manifest (including adding actions), relink the checkout so Herdr registers
-the new declarations:
+| Keys | Action |
+| --- | --- |
+| `j` / `k`, arrow keys | Scroll vertically. |
+| `gg` / `G` | Jump to the beginning / end. |
+| `h` / `l` | Scroll horizontally. |
+| `q`, Escape | Close the view. |
+
+## Supported agents
+
+| Agent | Session reference | Resume command | Stop method |
+| --- | --- | --- | --- |
+| OpenCode | Session ID | `opencode --session ID` | Verified SIGTERM. |
+| Claude Code | Session ID | `claude --resume ID` | Verified SIGTERM. |
+| Codex | Session ID from Herdr's Codex integration | `codex resume ID` | One Ctrl-D when the composer is verified empty. |
+| Pi | Absolute session path preferred, otherwise ID | `pi --session REF` | Verified SIGTERM. |
+
+Codex's current empty-composer check requires the visible placeholder
+`› Ask Codex to do anything`. Versions with a different placeholder are skipped
+even if the composer is empty. Ctrl-D is used to preserve terminal cleanup.
+
+Pi requires version **0.77 or newer** for its interactive SIGTERM cleanup.
+Supported process layouts include the native `pi` executable and Node/Bun
+wrappers for the known `@mariozechner/pi-coding-agent` and
+`@earendil-works/pi-coding-agent` packages.
+
+## Safety model
+
+- Only agents Herdr reports as `idle` are eligible. Working, blocked, unknown,
+  launching, and `done` agents are protected.
+- Every agent in the focused project is protected. Returning to a project
+  clears its inactivity timers.
+- A native session reference and verified process identity are required.
+  Missing or ambiguous data, including unavailable focus information, causes
+  the plugin to skip pausing the agent.
+- Session identity, process identity, focus, and eligibility are checked again
+  immediately before stopping an agent. Recovery metadata is saved first.
+- Codex is skipped if its composer may contain a draft. Stop methods never
+  escalate to SIGKILL; a timeout retains recovery metadata for later checks.
+- Recovery only resumes into a verified destination. Unmatched records are
+  retained for later recovery; conversation history remains in the coding
+  CLI's native storage.
+
+Pausing stops the agent process; resuming reopens its native conversation.
+Unsaved input is not guaranteed to survive for agents stopped with
+SIGTERM. Resume is triggered by pane focus, not background requests or memory
+pressure.
+
+## Updating
+
+For a locally linked plugin, update the same checkout. The watcher automatically
+reloads valid package source changes and configuration changes. Reloading starts
+fresh inactivity countdowns.
+
+After changes to `herdr-plugin.toml`, relink the checkout so Herdr registers the
+updated hooks, actions, and panes:
 
 ```bash
 herdr plugin link /path/to/herdr-rest
 ```
 
-The daemon watches the shared configuration and package source files at the
-normal polling cadence. Valid changes trigger an internal restart; malformed
-configuration or invalid imports leave the current watcher running and record
-the error in its log. A watcher restart begins fresh idle countdowns. Startup
-after a Herdr server restart is handled by the startup hook.
+## Development
+
+Run the test suite from the repository root:
+
+```bash
+python3 -m unittest discover -v
+```
+
+Tests use fake Herdr/CLI fixtures to cover inactivity policy, agent lifecycle,
+name and label restoration, restart recovery, and the inactivity view. Passing
+these tests does not establish compatibility with every coding-agent version
+or packaging layout.
+
+## Contributing
+
+For bug reports, include your operating system, Herdr and Python versions,
+coding-agent version, relevant configuration, and steps to reproduce the issue.
+
+Keep contributions focused and include regression coverage for lifecycle or
+recovery changes. Run the test suite before submitting a pull request.
