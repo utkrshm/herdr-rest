@@ -1,0 +1,27 @@
+id = "herdr.rest"
+name = "Herdr Rest"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Hibernate idle agents after their own inactivity interval while their project is unfocused, and resume on pane focus."
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["python3", "-m", "herdr_rest", "start"]
+
+[[events]]
+on = "pane.focused"
+command = ["python3", "-m", "herdr_rest", "focus"]
+
+[[actions]]
+id = "inactivity"
+title = "Agent inactivity"
+contexts = ["workspace"]
+command = ["python3", "-m", "herdr_rest", "open-view"]
+
+[[panes]]
+id = "inactivity"
+title = "Agent inactivity"
+placement = "popup"
+width = "95%"
+height = "80%"
+command = ["python3", "-m", "herdr_rest", "view"]
