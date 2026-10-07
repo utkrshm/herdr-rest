@@ -60,6 +60,9 @@ class Herdr:
     def rename_pane(self, pane_id: str, label: str | None) -> None:
         self.json("pane", "rename", pane_id, "--clear" if label is None else label)
 
+    def rename_agent(self, target: str, name: str | None) -> None:
+        self.json("agent", "rename", target, "--clear" if name is None else name)
+
     def agent_read(self, target: str) -> str:
         command = [self.binary, "agent", "read", target, "--source", "visible"]
         try:

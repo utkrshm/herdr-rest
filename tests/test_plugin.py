@@ -64,6 +64,7 @@ class FakeCli:
         self.agent_screen = ""
         self.sent_keys = []
         self.renamed = []
+        self.agent_renamed = []
 
     def agents(self):
         return list(self.agents_now)
@@ -86,6 +87,12 @@ class FakeCli:
         for pane in self.panes_now:
             if pane.get("pane_id") == pane_id:
                 pane["label"] = label
+
+    def rename_agent(self, target, name):
+        self.agent_renamed.append((target, name))
+        for agent_info in self.agents_now:
+            if agent_info.get("pane_id") == target:
+                agent_info["name"] = name
 
     def start(self, name, kind, pane_id, args):
         self.started.append((name, kind, pane_id, args))

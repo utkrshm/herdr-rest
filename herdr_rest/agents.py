@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,16 @@ PROCESS_NAMES = {
 }
 PI_PACKAGE_NAMES = {"@mariozechner/pi-coding-agent", "@earendil-works/pi-coding-agent"}
 PI_RUNTIME_NAMES = {"node", "nodejs", "bun"}
+
+
+def original_agent_name(record: dict[str, Any]) -> str | None:
+    """Use captured user names; older records used generated names as fallbacks."""
+    if "original_agent_name" in record:
+        return record["original_agent_name"]
+    name = record.get("name")
+    if not isinstance(name, str) or re.fullmatch(r"hibernate_[0-9a-f]{8}", name):
+        return None
+    return name
 
 
 def valid_session(agent: dict[str, Any]) -> bool:

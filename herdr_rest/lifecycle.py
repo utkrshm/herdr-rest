@@ -9,7 +9,7 @@ import signal
 import time
 from typing import Any
 
-from .agents import process_identity, resume_args, same_process
+from .agents import original_agent_name, process_identity, resume_args, same_process
 from .herdr import CliError
 from .recovery import rebind_record, restored_pane
 from .state import Registry
@@ -20,6 +20,27 @@ logger = logging.getLogger(__name__)
 
 class AgentLifecycleMixin:
     """Lifecycle methods operating on the state owned by Daemon."""
+
+    def _restore_agent_name(self, record: dict[str, Any], live: dict[str, Any] | None = None) -> bool:
+        original = original_agent_name(record)
+        if original == record.get("name"):
+            return True
+        try:
+            if live is None:
+                live = next((agent for agent in self.cli.agents() if agent.get("terminal_id") == record.get("terminal_id") and agent.get("pane_id") == record.get("pane_id")), None)
+            if live is None:
+                return False
+            # Only undo the name used by this resume, never a user edit or the
+            # name of a replacement agent/session in the same pane.
+            if live.get("name") != record.get("name") or live.get("agent") != record.get("kind"):
+                return True
+            session = live.get("agent_session")
+            if isinstance(session, dict) and (session.get("agent") != record.get("kind") or session.get("value") != record.get("session")):
+                return True
+            self.cli.rename_agent(record["pane_id"], original)
+        except CliError:
+            return False
+        return True
 
     def _reconcile(self, records: dict[str, dict[str, Any]], agents: list[dict[str, Any]], panes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         pane_by_terminal = {p.get("terminal_id"): p for p in panes}
@@ -77,8 +98,14 @@ class AgentLifecycleMixin:
                 record["terminal_id"] = terminal
                 changed = True
 
+            if "original_agent_name" not in record:
+                record["original_agent_name"] = original_agent_name(record)
+                changed = True
+
             if live:
                 saved_record = dict(record)
+                if not self._restore_agent_name(record, live):
+                    continue
                 if not self._restore_sleeping_label(record):
                     continue
                 session = live.get("agent_session")
@@ -153,6 +180,7 @@ class AgentLifecycleMixin:
                 "workspace_id": latest_after_info.get("workspace_id"),
                 "tab_id": latest_after_info.get("tab_id"),
                 "name": latest_after_info.get("name") or f"hibernate_{terminal[-8:].lower()}",
+                "original_agent_name": latest_after_info.get("name"),
                 "kind": session["agent"],
                 "session": session["value"],
                 "session_ref_kind": session.get("kind", "id"),
@@ -281,6 +309,8 @@ class AgentLifecycleMixin:
 
             try:
                 if any(item.get("terminal_id") == terminal for item in self.cli.agents()):
+                    if not self._restore_agent_name(record):
+                        continue
                     if not self._restore_sleeping_label(record):
                         continue
                     records.pop(terminal, None)
@@ -305,7 +335,7 @@ class AgentLifecycleMixin:
                 )
                 continue
 
-            if not self._restore_sleeping_label(record):
+            if not self._restore_agent_name(record) or not self._restore_sleeping_label(record):
                 self.focus_retry_at[terminal] = now + self.config.poll_seconds
                 self.focus_deadline = self.focus_retry_at[terminal]
                 continue
